@@ -48,9 +48,14 @@ STAGING_DIR = Path("data/celebahq/_staging")
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
-def _collect_images(root: Path) -> list[Path]:
+def _collect_images(root: Path, verbose: bool = False) -> list[Path]:
     """Recursively collect image files under *root*."""
-    return sorted(p for p in root.rglob("*") if p.suffix.lower() in EXTENSIONS)
+    if verbose:
+        print(f"      Scanning {root} …", end=" ", flush=True)
+    result = sorted(p for p in root.rglob("*") if p.suffix.lower() in EXTENSIONS)
+    if verbose:
+        print(f"{len(result)} images found.")
+    return result
 
 
 def _find_image_root(base: Path) -> Path:
@@ -174,20 +179,36 @@ def prepare(source: Path, target: Path, resolution: int | None) -> None:
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)
 
-    images = _collect_images(source)
+    source_resolved = source.resolve()
+    target_resolved = target.resolve()
+    inplace = source_resolved == target_resolved
+
+    images = _collect_images(source, verbose=True)
     if not images:
         raise RuntimeError(f"No images found in {source}")
 
-    # Filter out images that are already in the target dir to avoid self-copy
-    target_resolved = target.resolve()
-    images = [p for p in images if not p.resolve().is_relative_to(target_resolved)]
-    if not images:
-        existing = len(_collect_images(target))
-        if existing:
-            print(f"\n[3/3] Target already contains {existing} images — nothing to do.")
+    if inplace:
+        # source == target: resize images in-place
+        if not resolution:
+            print(f"\n[3/3] {len(images)} images already in {target}, no resize requested — nothing to do.")
             return
-        raise RuntimeError(f"No source images found outside target directory.")
+        print(f"\n[3/3] Resizing {len(images)} images in-place to {resolution}×{resolution} (Lanczos)")
+        resized = 0
+        for img_path in tqdm(images, desc="Resizing", unit="img"):
+            img = Image.open(img_path).convert("RGB")
+            if img.size == (resolution, resolution):
+                continue
+            img = img.resize((resolution, resolution), Image.LANCZOS)
+            dst = img_path.with_suffix(".png")
+            img.save(dst, "PNG")
+            # Remove original if it had a different extension
+            if dst != img_path:
+                img_path.unlink()
+            resized += 1
+        print(f"      Done — {resized} images resized, {len(images) - resized} already correct size.")
+        return
 
+    # source != target: copy/resize into target
     print(f"\n[3/3] Preparing {len(images)} images → {target}")
     if resolution:
         print(f"      Resizing to {resolution}×{resolution} (Lanczos)")
