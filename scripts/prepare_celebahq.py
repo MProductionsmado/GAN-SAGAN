@@ -5,26 +5,28 @@ This script organises CelebA-HQ images into the expected layout::
 
     data/celebahq/train/<images>
 
-Default behaviour is convenient for first-time setup:
-* If ``--source`` already contains images, it prepares them.
-* If ``--source`` is missing or empty, it automatically downloads CelebA-HQ
-  from Kaggle and then prepares it.
+It works in three phases, each with progress output:
+
+  1. **Download** (if needed) — fetches the dataset ZIP from Kaggle
+  2. **Extract**  — unpacks the ZIP with a progress bar
+  3. **Prepare**  — resizes / copies images into the target directory
 
 Examples
 --------
-1) One-command setup (download + prepare)::
+One-command setup (download + extract + prepare)::
 
-    python scripts/prepare_celebahq.py --source /path/to/celebahq --resolution 256
+    python scripts/prepare_celebahq.py --resolution 256
 
-2) Use an existing local image folder (no download)::
+Use an existing local folder (skip download)::
 
-    python scripts/prepare_celebahq.py --source /path/to/CelebA-HQ-img --resolution 256 --download never
+    python scripts/prepare_celebahq.py --source /path/to/images --resolution 256 --download never
 
 Kaggle auth
 -----------
 For automatic download, set up the Kaggle API once:
-* Create API token on kaggle.com (Account -> API -> Create New Token)
-* Place ``kaggle.json`` in ``~/.kaggle/kaggle.json``
+
+1. Create API token: kaggle.com → Account → API → *Create New Token*
+2. Place ``kaggle.json`` in ``~/.kaggle/kaggle.json``
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ import argparse
 import os
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 
 from PIL import Image
@@ -40,30 +43,51 @@ from tqdm import tqdm
 
 EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 DEFAULT_DATASET = "lamsimon/celebahq"
+STAGING_DIR = Path("data/celebahq/_staging")
 
+
+# ── helpers ───────────────────────────────────────────────────────────────
 
 def _collect_images(root: Path) -> list[Path]:
+    """Recursively collect image files under *root*."""
     return sorted(p for p in root.rglob("*") if p.suffix.lower() in EXTENSIONS)
 
 
-def _auto_download_with_kaggle_cli(source_dir: Path, dataset: str) -> Path | None:
-    """Download dataset via Kaggle CLI and return a directory containing images."""
+def _find_image_root(base: Path) -> Path:
+    """Return *base* itself or the first sub-directory that contains images."""
+    if _collect_images(base):
+        return base
+    for candidate in sorted(base.rglob("*")):
+        if candidate.is_dir() and _collect_images(candidate):
+            return candidate
+    return base  # fallback
+
+
+def _extract_zip(zip_path: Path, dest: Path) -> None:
+    """Extract a ZIP archive with a tqdm progress bar."""
+    print(f"\n[2/3] Extracting {zip_path.name} …")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        members = zf.infolist()
+        for member in tqdm(members, desc="Extracting", unit="file"):
+            zf.extract(member, dest)
+    print(f"      Extracted {len(members)} entries to {dest}")
+
+
+# ── download strategies ──────────────────────────────────────────────────
+
+def _download_with_kaggle_cli(staging: Path, dataset: str) -> Path | None:
+    """Download ZIP via Kaggle CLI (without --unzip) and extract ourselves."""
     kaggle_bin = shutil.which("kaggle")
     if kaggle_bin is None:
         return None
 
-    source_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[INFO] Downloading '{dataset}' via Kaggle CLI into: {source_dir}")
+    staging.mkdir(parents=True, exist_ok=True)
+    print(f"[1/3] Downloading '{dataset}' via Kaggle CLI …")
 
     cmd = [
-        kaggle_bin,
-        "datasets",
-        "download",
-        "-d",
-        dataset,
-        "-p",
-        str(source_dir),
-        "--unzip",
+        kaggle_bin, "datasets", "download",
+        "-d", dataset,
+        "-p", str(staging),
     ]
     try:
         subprocess.run(cmd, check=True)
@@ -71,76 +95,82 @@ def _auto_download_with_kaggle_cli(source_dir: Path, dataset: str) -> Path | Non
         print(f"[WARN] Kaggle CLI download failed ({exc}).")
         return None
 
-    if _collect_images(source_dir):
-        return source_dir
+    # Find the downloaded ZIP
+    zips = sorted(staging.glob("*.zip"))
+    if not zips:
+        # Kaggle may have auto-extracted — look for images directly
+        return _find_image_root(staging) if _collect_images(staging) else None
 
-    # Some archives unpack to nested directories.
-    for candidate in sorted(source_dir.rglob("*")):
-        if candidate.is_dir() and _collect_images(candidate):
-            return candidate
-    return None
+    _extract_zip(zips[0], staging)
+    zips[0].unlink()  # clean up ZIP to save disk space
+
+    return _find_image_root(staging)
 
 
-def _auto_download_with_kagglehub(dataset: str) -> Path | None:
-    """Download dataset via kagglehub and return a directory containing images."""
+def _download_with_kagglehub(dataset: str) -> Path | None:
+    """Download via kagglehub and return image directory."""
     try:
         import kagglehub  # type: ignore
-    except Exception:
+    except ImportError:
         return None
 
-    print(f"[INFO] Downloading '{dataset}' via kagglehub ...")
+    print(f"[1/3] Downloading '{dataset}' via kagglehub …")
     try:
-        downloaded_path = Path(kagglehub.dataset_download(dataset))
+        downloaded = Path(kagglehub.dataset_download(dataset))
     except Exception as exc:
         print(f"[WARN] kagglehub download failed ({exc}).")
         return None
 
-    if _collect_images(downloaded_path):
-        return downloaded_path
-    for candidate in sorted(downloaded_path.rglob("*")):
-        if candidate.is_dir() and _collect_images(candidate):
-            return candidate
-    return None
+    return _find_image_root(downloaded)
 
+
+# ── source resolution ────────────────────────────────────────────────────
 
 def resolve_source(
-    source: Path,
+    source: Path | None,
     download_mode: str,
     dataset: str,
 ) -> Path:
-    """Resolve a usable source directory, downloading when requested/needed."""
-    source_exists_with_images = source.exists() and bool(_collect_images(source))
+    """Return a directory that contains CelebA-HQ images, downloading if needed."""
+
+    has_images = source is not None and source.exists() and bool(_collect_images(source))
 
     if download_mode == "never":
-        if not source_exists_with_images:
+        if not has_images:
             raise RuntimeError(
-                f"No images found in {source} and download_mode='never'."
+                f"No images found in '{source}' and --download=never."
             )
-        return source
+        print("[1/3] Using existing source — skipping download.")
+        return source  # type: ignore[return-value]
 
-    should_download = download_mode == "always" or not source_exists_with_images
-    if not should_download:
-        return source
+    if has_images and download_mode != "always":
+        print(f"[1/3] Found images in {source} — skipping download.")
+        return source  # type: ignore[return-value]
 
-    print("[INFO] Source directory is empty/missing or forced download is enabled.")
+    print("[INFO] No local images found (or --download=always). Starting download …\n")
 
-    downloaded_source = _auto_download_with_kaggle_cli(source, dataset)
-    if downloaded_source is not None:
-        print(f"[INFO] Download successful. Using source: {downloaded_source}")
-        return downloaded_source
+    # Use a dedicated staging dir so we never mix raw downloads with the target
+    staging = STAGING_DIR
+    result = _download_with_kaggle_cli(staging, dataset)
+    if result is not None:
+        return result
 
-    downloaded_source = _auto_download_with_kagglehub(dataset)
-    if downloaded_source is not None:
-        print(f"[INFO] Download successful. Using source: {downloaded_source}")
-        return downloaded_source
+    result = _download_with_kagglehub(dataset)
+    if result is not None:
+        return result
 
     raise RuntimeError(
-        "Automatic download failed. Please ensure Kaggle credentials are configured "
-        "(~/.kaggle/kaggle.json) and either `kaggle` CLI or `kagglehub` is installed."
+        "Automatic download failed.\n"
+        "  • Ensure Kaggle credentials exist at ~/.kaggle/kaggle.json\n"
+        "  • Install either the `kaggle` CLI or the `kagglehub` package\n"
+        "  • Or download manually and pass --source /path/to/images --download never"
     )
 
 
+# ── prepare (resize / copy) ──────────────────────────────────────────────
+
 def prepare(source: Path, target: Path, resolution: int | None) -> None:
+    """Copy / resize images from *source* into *target*."""
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)
 
@@ -148,13 +178,22 @@ def prepare(source: Path, target: Path, resolution: int | None) -> None:
     if not images:
         raise RuntimeError(f"No images found in {source}")
 
-    print(f"Found {len(images)} images in {source}")
-    print(f"Target directory: {target}")
+    # Filter out images that are already in the target dir to avoid self-copy
+    target_resolved = target.resolve()
+    images = [p for p in images if not p.resolve().is_relative_to(target_resolved)]
+    if not images:
+        existing = len(_collect_images(target))
+        if existing:
+            print(f"\n[3/3] Target already contains {existing} images — nothing to do.")
+            return
+        raise RuntimeError(f"No source images found outside target directory.")
+
+    print(f"\n[3/3] Preparing {len(images)} images → {target}")
     if resolution:
-        print(f"Resizing to {resolution}x{resolution} (Lanczos)")
+        print(f"      Resizing to {resolution}×{resolution} (Lanczos)")
 
     skipped = 0
-    for img_path in tqdm(images, desc="Preparing"):
+    for img_path in tqdm(images, desc="Preparing", unit="img"):
         dst = target / f"{img_path.stem}.png"
         if dst.exists():
             skipped += 1
@@ -166,41 +205,67 @@ def prepare(source: Path, target: Path, resolution: int | None) -> None:
         else:
             shutil.copy2(img_path, dst)
 
-    total = len(images) - skipped
-    print(f"Done. Copied/resized {total} images, skipped {skipped} existing.")
+    processed = len(images) - skipped
+    print(f"      Done — {processed} images written, {skipped} skipped (existing).")
 
+
+# ── CLI ───────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Prepare CelebA-HQ dataset")
+    parser = argparse.ArgumentParser(
+        description="Download and prepare CelebA-HQ for training",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  # Auto-download + resize to 256×256:\n"
+            "  python scripts/prepare_celebahq.py --resolution 256\n\n"
+            "  # Use local images, no download:\n"
+            "  python scripts/prepare_celebahq.py --source my_imgs/ --resolution 256 --download never\n"
+        ),
+    )
     parser.add_argument(
-        "--source", type=str, required=True,
-        help="Local source dir with images OR target download dir (if auto-download is needed)",
+        "--source", type=str, default=None,
+        help="Local dir with images. If omitted or empty, dataset is downloaded.",
     )
     parser.add_argument(
         "--target", type=str, default="data/celebahq/train",
-        help="Target directory (default: data/celebahq/train)",
+        help="Output directory for prepared images (default: data/celebahq/train)",
     )
     parser.add_argument(
         "--resolution", type=int, default=None,
-        help="Resize images to this resolution (e.g. 256). If omitted, copies as-is.",
+        help="Resize images to this square size (e.g. 256). Omit to copy as-is.",
     )
     parser.add_argument(
-        "--download",
-        type=str,
-        default="auto",
+        "--download", type=str, default="auto",
         choices=["auto", "always", "never"],
-        help="Download behaviour: auto (default), always, never",
+        help="Download mode: auto (default) | always | never",
     )
     parser.add_argument(
-        "--dataset",
-        type=str,
-        default=DEFAULT_DATASET,
-        help=f"Kaggle dataset slug for auto-download (default: {DEFAULT_DATASET})",
+        "--dataset", type=str, default=DEFAULT_DATASET,
+        help=f"Kaggle dataset slug (default: {DEFAULT_DATASET})",
+    )
+    parser.add_argument(
+        "--keep-staging", action="store_true",
+        help="Keep the staging directory after preparation (default: delete)",
     )
     args = parser.parse_args()
 
-    source = resolve_source(Path(args.source), args.download, args.dataset)
+    source = resolve_source(
+        Path(args.source) if args.source else None,
+        args.download,
+        args.dataset,
+    )
     prepare(source, Path(args.target), args.resolution)
+
+    # Cleanup staging
+    if not args.keep_staging and STAGING_DIR.exists():
+        print(f"\nCleaning up staging directory ({STAGING_DIR}) …")
+        shutil.rmtree(STAGING_DIR)
+        print("Done.")
+
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
