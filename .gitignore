@@ -1,0 +1,40 @@
+# Data
+data/celebahq/
+data/*.zip
+data/*.tar.gz
+
+# Outputs
+outputs/
+runs/
+reports/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# PyTorch
+*.pth
+*.pt
+*.ckpt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tensorboard
+events.out.tfevents.*
+
+# Misc
+*.log
+wandb/
