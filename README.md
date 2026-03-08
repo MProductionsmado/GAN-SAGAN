@@ -15,7 +15,7 @@ The **only controlled variable** is the presence of Self-Attention blocks. Every
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Prepare CelebA-HQ (see "Data Preparation" below)
+# 2. Prepare CelebA-HQ (auto-download + prepare)
 python scripts/prepare_celebahq.py --source /path/to/celebahq --resolution 256
 
 # 3. Train baseline GAN
@@ -91,25 +91,39 @@ python -m src.training compare --run_a runs/gan_256 --run_b runs/sagan_256
 
 ### CelebA-HQ
 
-CelebA-HQ contains 30,000 high-quality face images. You can obtain it from:
+CelebA-HQ contains 30,000 high-quality face images.
 
-1. **Kaggle**: [CelebA-HQ dataset](https://www.kaggle.com/datasets/lamsimon/celebahq)
-2. **Google Drive**: [Official links from the PGGAN paper](https://github.com/tkarras/progressive_growing_of_gans)
-3. **Academic mirrors**: Check your institution's data repositories
-
-Once downloaded, prepare the dataset:
+### One-command setup (recommended)
 
 ```bash
-# If you have a folder of raw CelebA-HQ images:
+python scripts/prepare_celebahq.py \
+    --source /path/to/celebahq \
+    --target data/celebahq/train \
+    --resolution 256
+```
+
+If `/path/to/celebahq` is empty or missing, the script automatically downloads
+`lamsimon/celebahq` from Kaggle, then resizes/prepares everything.
+
+Kaggle API one-time setup:
+- Create token: kaggle.com -> Account -> API -> `Create New Token`
+- Save token to `~/.kaggle/kaggle.json`
+
+### Existing local dataset (no download)
+
+```bash
+# Use an existing local folder of CelebA-HQ images:
 python scripts/prepare_celebahq.py \
     --source /path/to/CelebA-HQ-img \
     --target data/celebahq/train \
-    --resolution 256
+    --resolution 256 \
+    --download never
 
 # If images are already at the desired resolution, omit --resolution:
 python scripts/prepare_celebahq.py \
     --source /path/to/celebahq_256 \
-    --target data/celebahq/train
+    --target data/celebahq/train \
+    --download never
 ```
 
 Expected layout after preparation:

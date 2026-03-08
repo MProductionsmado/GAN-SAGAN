@@ -20,6 +20,8 @@ dependencies = [
     "tensorboard>=2.13",
     "clean-fid>=0.1.35",
     "scipy>=1.10",
+    "kaggle>=1.6.17",
+    "kagglehub>=0.3.4",
 ]
 
 [project.optional-dependencies]
